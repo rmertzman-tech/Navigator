@@ -583,12 +583,10 @@ nav::-webkit-scrollbar{display:none}
   .section-title{font-size:1.3rem;}
 }
 </style>
-<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#060b18">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="Navigator">
-<link rel="apple-touch-icon" href="icon-192.png">
 </head>
 <body>
 
@@ -1027,7 +1025,37 @@ function showTab(id,btn){
 // TWIN SYSTEM
 // ═══════════════════════════════════════════════════════
 var BACKEND = 'https://ucp-backend-4dig.onrender.com';
+var PROXY_ENDPOINT = BACKEND + '/api/claude-proxy';
 var _twinActive = false;
+
+function callTwinBackend(systemPrompt, content, maxTokens){
+  return fetch(PROXY_ENDPOINT, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      model:'claude-sonnet-4-6',
+      max_tokens:maxTokens || 900,
+      system:systemPrompt,
+      messages:[{role:'user', content:content}]
+    })
+  })
+  .then(function(r){
+    if(!r.ok){
+      return r.text().then(function(t){ throw new Error('HTTP_'+r.status+': '+t); });
+    }
+    return r.json();
+  })
+  .then(function(data){
+    return (
+      data.response ||
+      data.reply ||
+      data.text ||
+      (data.content && data.content[0] && data.content[0].text) ||
+      ''
+    ).trim();
+  });
+}
+
 
 var TWIN_DIMS = [
   {letter:'A',name:'Agency',      q:'What does this person choose \u2014 and why?',          color:'#4A90A4'},
@@ -1193,20 +1221,16 @@ function startTwinConversation(){
   ts.messageCount=0;
   saveTwinState(ts);
 
-  fetch(BACKEND+'/companion',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({system:systemPrompt,content:'Begin. Introduce yourself and ask your first question.'})
-  })
-  .then(function(r){return r.json();})
-  .then(function(data){
+  callTwinBackend(systemPrompt, 'Begin. Introduce yourself and ask your first question.', 900)
+  .then(function(reply){
     var msgs=document.getElementById('chat-messages');
     if(msgs){var last=msgs.lastChild;if(last&&last.textContent.indexOf('\u2026')>=0)msgs.removeChild(last);}
-    addChatMsg('twin',data.response||'Hello. I am trying to understand who I am. Will you help me?');
+    addChatMsg('twin', reply || 'Hello. I am trying to understand who I am. Will you help me?');
     updateTwinPanel();
     renderTwinChart();
   })
-  .catch(function(){
+  .catch(function(err){
+    console.warn('Twin connection:', err.message);
     var msgs=document.getElementById('chat-messages');
     if(msgs){var last=msgs.lastChild;if(last)msgs.removeChild(last);}
     addChatMsg('sys','Connection unavailable \u2014 try again in a moment.');
@@ -1244,22 +1268,17 @@ function sendToTwin(){
 
   addChatMsg('sys','\u2026');
 
-  fetch(BACKEND+'/companion',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({system:systemPrompt,content:ctx})
-  })
-  .then(function(r){return r.json();})
-  .then(function(data){
+  callTwinBackend(systemPrompt, ctx, 900)
+  .then(function(reply){
     var msgs2=document.getElementById('chat-messages');
     if(msgs2){var last=msgs2.lastChild;if(last&&last.textContent==='\u2026')msgs2.removeChild(last);}
-    var reply=data.response||'';
     if(reply) addChatMsg('twin',reply);
     ts.messageCount=(ts.messageCount||0)+1;
     if(ts.messageCount%2===0&&text.length>25) extractLearning(text);
     saveTwinState(ts);
   })
-  .catch(function(){
+  .catch(function(err){
+    console.warn('Twin reply:', err.message);
     var msgs2=document.getElementById('chat-messages');
     if(msgs2){var last=msgs2.lastChild;if(last&&last.textContent==='\u2026')msgs2.removeChild(last);}
   });
@@ -1469,11 +1488,9 @@ function removeNonneg(i){
 // INIT
 // ═══════════════════════════════════════════════════════
 // ── PWA Service Worker ───────────────────────────────────
-if('serviceWorker' in navigator && location.protocol === 'https:'){
-  navigator.serviceWorker.register('sw.js')
-    .then(function(r){ console.log('Navigator SW registered'); })
-    .catch(function(e){ console.warn('SW:', e.message); });
-}
+// Disabled in this single-file GitHub Pages build so the page does not
+// request a missing sw.js file and generate a 404. Re-enable only if you
+// also commit a matching sw.js file at the repo root.
 
 // ── Install prompt ────────────────────────────────────────
 var _deferredInstall = null;
@@ -1493,23 +1510,77 @@ window.addEventListener('beforeinstallprompt', function(e){
 function showInstallHint(){
   if(!_deferredInstall) return;
   if(document.getElementById('install-hint')) return;
+
   var hint = document.createElement('div');
   hint.id = 'install-hint';
-  hint.style.cssText = 'position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);'+
-    'background:#17233d;border:1px solid rgba(201,168,76,.3);border-radius:10px;'+
-    'padding:.9rem 1.25rem;max-width:320px;width:90%;'+
-    'box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:200;'+
-    'font-family:'DM Sans',sans-serif;font-size:.85rem;color:#f0ece4;'+
-    'display:flex;align-items:center;gap:.75rem;';
-  hint.innerHTML =
-    '<div style="flex:1"><div style="font-weight:600;margin-bottom:.2rem">Add to your home screen</div>'+
-    '<div style="opacity:.6;font-size:.78rem">One tap away, any time.</div></div>'+
-    '<button onclick="doInstall()" style="background:#c9a84c;color:#060b18;border:none;'+
-    'border-radius:6px;padding:.45rem .9rem;font-weight:600;cursor:pointer;'+
-    'font-family:'DM Sans',sans-serif;font-size:.82rem;white-space:nowrap">Install</button>'+
-    '<button onclick="document.getElementById('install-hint').remove()" '+
-    'style="background:none;border:none;color:rgba(240,236,228,.3);cursor:pointer;'+
-    'font-size:1.1rem;padding:0 .2rem">&#215;</button>';
+  hint.style.cssText = [
+    'position:fixed',
+    'bottom:1.5rem',
+    'left:50%',
+    'transform:translateX(-50%)',
+    'background:#17233d',
+    'border:1px solid rgba(201,168,76,.3)',
+    'border-radius:10px',
+    'padding:.9rem 1.25rem',
+    'max-width:320px',
+    'width:90%',
+    'box-shadow:0 4px 24px rgba(0,0,0,.5)',
+    'z-index:200',
+    'font-family:"DM Sans",sans-serif',
+    'font-size:.85rem',
+    'color:#f0ece4',
+    'display:flex',
+    'align-items:center',
+    'gap:.75rem'
+  ].join(';') + ';';
+
+  var copy = document.createElement('div');
+  copy.style.flex = '1';
+
+  var title = document.createElement('div');
+  title.style.fontWeight = '600';
+  title.style.marginBottom = '.2rem';
+  title.textContent = 'Add to your home screen';
+
+  var subtitle = document.createElement('div');
+  subtitle.style.opacity = '.6';
+  subtitle.style.fontSize = '.78rem';
+  subtitle.textContent = 'One tap away, any time.';
+
+  copy.appendChild(title);
+  copy.appendChild(subtitle);
+
+  var installBtn = document.createElement('button');
+  installBtn.textContent = 'Install';
+  installBtn.style.cssText = [
+    'background:#c9a84c',
+    'color:#060b18',
+    'border:none',
+    'border-radius:6px',
+    'padding:.45rem .9rem',
+    'font-weight:600',
+    'cursor:pointer',
+    'font-family:"DM Sans",sans-serif',
+    'font-size:.82rem',
+    'white-space:nowrap'
+  ].join(';') + ';';
+  installBtn.addEventListener('click', doInstall);
+
+  var closeBtn = document.createElement('button');
+  closeBtn.innerHTML = '&#215;';
+  closeBtn.style.cssText = [
+    'background:none',
+    'border:none',
+    'color:rgba(240,236,228,.3)',
+    'cursor:pointer',
+    'font-size:1.1rem',
+    'padding:0 .2rem'
+  ].join(';') + ';';
+  closeBtn.addEventListener('click', function(){ hint.remove(); });
+
+  hint.appendChild(copy);
+  hint.appendChild(installBtn);
+  hint.appendChild(closeBtn);
   document.body.appendChild(hint);
 }
 
