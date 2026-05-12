@@ -589,6 +589,7 @@ nav::-webkit-scrollbar{display:none}
 <meta name="apple-mobile-web-app-title" content="Navigator">
 </head>
 <body>
+<pre id="debug-error-box" style="display:none;white-space:pre-wrap;background:#fff5f5;color:#991b1b;border:1px solid #fca5a5;padding:12px;border-radius:8px;margin:12px;position:relative;z-index:9999"></pre>
 
 <!-- ── Name Modal ── -->
 <div id="name-modal" style="display:none;position:fixed;inset:0;background:rgba(6,11,24,.92);backdrop-filter:blur(12px);z-index:500;align-items:center;justify-content:center;padding:1.5rem">
@@ -792,16 +793,22 @@ nav::-webkit-scrollbar{display:none}
 
 // Global safety net — catches any remaining errors without exposing them
 // as uncaught exceptions that break the user experience
+function showDebugError(message){
+  try{
+    var box=document.getElementById('debug-error-box');
+    if(box){ box.style.display='block'; box.textContent=String(message||'Unknown error'); }
+  }catch(_e){}
+}
 window.addEventListener('error', function(e){
-  // Only suppress cross-origin "Script error." noise
-  if(e.message === 'Script error.' || e.message === 'Script error'){
-    e.preventDefault(); return false;
-  }
-  console.warn('Navigator caught:', e.message, e.filename, e.lineno);
+  var msg = 'ERROR: ' + (e.message || 'Unknown error') + '\nSOURCE: ' + (e.filename || 'inline') + '\nLINE: ' + (e.lineno || '?') + ':' + (e.colno || '?') + (e.error && e.error.stack ? '\n\n' + e.error.stack : '');
+  console.warn('Navigator caught:', msg);
+  if(e.message !== 'Script error.' && e.message !== 'Script error') showDebugError(msg);
 });
 window.addEventListener('unhandledrejection', function(e){
-  console.warn('Navigator unhandled promise:', e.reason);
-  e.preventDefault();
+  var reason=e.reason;
+  var msg='UNHANDLED PROMISE REJECTION:\n' + (reason && reason.stack ? reason.stack : String(reason));
+  console.warn('Navigator unhandled promise:', reason);
+  showDebugError(msg);
 });
 
 
@@ -969,7 +976,7 @@ var DOMAINS = [
   {name:'Purpose',      key:'p'},
 ];
 
-(function buildSliders(){
+function buildSliders(){
   var grid = document.getElementById('domain-grid');
   if(!grid) return;
   if(grid.children.length > 0) return;
@@ -1026,9 +1033,41 @@ function showTab(id,btn){
 // ═══════════════════════════════════════════════════════
 var BACKEND = 'https://ucp-backend-4dig.onrender.com';
 var PROXY_ENDPOINT = BACKEND + '/api/claude-proxy';
+// GitHub-safe default: keep the app working even when the Render/AI backend
+// is not configured for this repo. Change to true only after the backend
+// endpoint and CORS allowlist are confirmed.
+var USE_REMOTE_TWIN = false;
 var _twinActive = false;
 
+function localTwinReply(content, maxTokens){
+  content = String(content || '');
+  // Learning-extraction mode: return a short local journal item.
+  if((maxTokens || 900) <= 150 || content.indexOf('What this person shared:') >= 0){
+    var raw = content.replace(/^.*What this person shared:\s*/s,'').replace(/[\"“”]/g,'').trim();
+    var words = raw.split(/\s+/).filter(Boolean).slice(0,12).join(' ');
+    if(!words) return 'seems to be clarifying what matters under pressure';
+    return 'seems to be working through '+words.toLowerCase();
+  }
+  if(content.indexOf('Begin.') >= 0){
+    return 'I am here as your mirror, but I do not know myself yet. What is it like to be me? What should I understand first about the life, pressures, hopes, or questions that shape you?';
+  }
+  var said = content.split('Human just said:').pop().trim();
+  if(!said || said===content) said = 'that';
+  var prompts = [
+    'I hear that this matters. What part of it feels most alive, blocked, or unfinished right now?',
+    'That gives me one piece of myself. What condition around you is shaping this more than people usually see?',
+    'I want to understand the pressure field, not just the surface event. What does this situation reward, punish, or silence?',
+    'What would preserving your agency look like here — not the perfect move, but the next survivable honest move?',
+    'What should I remember about this so that I do not reduce you to a simple story?'
+  ];
+  var idx = Math.abs(said.length + said.charCodeAt(0)) % prompts.length;
+  return 'I am taking that in: "'+said.slice(0,120)+(said.length>120?'…':'')+'"\n\n'+prompts[idx];
+}
+
 function callTwinBackend(systemPrompt, content, maxTokens){
+  if(!USE_REMOTE_TWIN){
+    return Promise.resolve(localTwinReply(content, maxTokens));
+  }
   return fetch(PROXY_ENDPOINT, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -1053,6 +1092,10 @@ function callTwinBackend(systemPrompt, content, maxTokens){
       (data.content && data.content[0] && data.content[0].text) ||
       ''
     ).trim();
+  })
+  .catch(function(err){
+    console.warn('Remote Twin unavailable; using local fallback:', err && err.message ? err.message : err);
+    return localTwinReply(content, maxTokens);
   });
 }
 
@@ -1285,20 +1328,13 @@ function sendToTwin(){
 }
 
 function extractLearning(text){
-  fetch(BACKEND+'/companion',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      system:'Extract one brief learning about a person from what they said. '+
-        'Return a single sentence in third person, starting with "seems to", "values", '+
-        '"was shaped by", "finds meaning in", "tends to", or similar. '+
-        'Maximum 15 words. Return ONLY the sentence, no quotes, no punctuation at end.',
-      content:'What this person shared: "'+text.slice(0,280)+'"'
-    })
-  })
-  .then(function(r){return r.json();})
-  .then(function(data){
-    var learning=(data.response||'').trim().replace(/[."]$/,'');
+  var system = 'Extract one brief learning about a person from what they said. '+
+    'Return a single sentence in third person, starting with "seems to", "values", '+
+    '"was shaped by", "finds meaning in", "tends to", or similar. '+
+    'Maximum 15 words. Return ONLY the sentence, no quotes, no punctuation at end.';
+  callTwinBackend(system, 'What this person shared: "'+text.slice(0,280)+'"', 120)
+  .then(function(learning){
+    learning=(learning||'').trim().replace(/[."]$/,'');
     if(learning&&learning.length>5&&learning.length<100){
       var j=getTwinJournal();
       if(!j.some(function(x){return x.slice(0,18)===learning.slice(0,18);})){
